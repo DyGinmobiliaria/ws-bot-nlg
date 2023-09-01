@@ -1,0 +1,368 @@
+from config import TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, OPENAI_API_KEY
+from flask import Flask, request
+from twilio.rest import Client
+import openai
+import spacy
+from dotenv import load_dotenv
+from nltk.tokenize import word_tokenize
+from nltk.tag import pos_tag
+from nltk.sentiment import SentimentIntensityAnalyzer
+from nltk.stem import WordNetLemmatizer
+from emoji import assign_emojis
+from datos_desarrollos import obtener_contexto
+from faq_desarrollos import faq_DyG
+from property_data import property_data
+from phone_utils import process_phone_number
+from zapier_utils import send_to_zapier
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from nltk.tag import pos_tag
+import nltk.data
+from flask import Flask, request, jsonify
+import random
+from spacy.lang.es.stop_words import STOP_WORDS
+from solicitudes_nombre import formas_solicitud_nombre
+from saludos import obtener_saludo
+import random
+from nltk import ne_chunk, pos_tag, word_tokenize
+from nltk.tree import Tree
+import datos_desarrollos
+import json
+import re
+import urllib.parse
+
+
+
+
+load_dotenv()
+
+# Crear la aplicación Flask
+app = Flask(__name__)
+
+# Cargar el modelo de spaCy para NER en español fuera de la función
+nlp_model = spacy.load('es_core_news_sm')
+
+# Definir variables y configuraciones
+client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+sia = SentimentIntensityAnalyzer()
+lemmatizer = WordNetLemmatizer()
+
+desarrollos = datos_desarrollos.desarrollos
+
+def extract_entities(message, nlp_model):
+    # Procesar el mensaje con el modelo de spaCy pasado como parámetro
+    doc = nlp_model(message)
+
+    # Obtener las entidades nombradas detalladas del mensaje
+    named_entities = []
+    for ent in doc.ents:
+        named_entities.append({
+            'text': ent.text,
+            'start': ent.start_char,
+            'end': ent.end_char,
+            'label': ent.label_,
+            'lemma': ent.lemma_
+        })
+    return named_entities
+
+def preprocesar_mensaje(message):
+    tokens = word_tokenize(message)
+    pos_tags = pos_tag(tokens)
+    return pos_tags
+
+
+def detectar_intenciones(pos_tags, message):
+    # Realizar análisis de sentimiento
+    sia = SentimentIntensityAnalyzer()
+    sentiment_scores = sia.polarity_scores(message)
+    sentiment_score = sentiment_scores['compound']
+
+    # Realizar análisis de entidades nombradas
+    doc = nlp_model(message)
+    named_entities = [ent.text for ent in doc.ents]
+
+    # Determinar la intención del cliente
+    if sentiment_score <= -0.05:
+        intencion = 'queja'
+
+    return intencion
+
+def generar_respuesta(intencion, ultimo_mensaje_cliente):
+    if intencion == 'queja':
+        mensaje_cliente_encoded = urllib.parse.quote(ultimo_mensaje_cliente)
+        texto_resaltado = "*Reclamo abierto:*"
+        texto_resaltado_encoded = urllib.parse.quote(texto_resaltado)
+        enlace_botón = f"https://api.whatsapp.com/send?phone=+523310678076&text={texto_resaltado_encoded}%0A{mensaje_cliente_encoded}"
+        respuesta = f"Lamentamos escuchar eso. Por favor, envíanos los detalles de tu queja y nos pondremos en contacto contigo lo antes posible. Puedes hacer clic en el siguiente enlace para abrir WhatsApp y contactar al departamento de Calidad.\n\n{texto_resaltado}\n{enlace_botón}"
+    return respuesta
+
+def extract_message_data(message, nlp_model):
+    names = []
+
+    # Aplicar el modelo de spaCy al mensaje utilizando el modelo pasado como parámetro
+    doc = nlp_model(message)
+
+    # Extraer las entidades nombradas relevantes del documento
+    for entity in doc.ents:
+        if entity.label_ in ["PER", "PERS", "ORG"]:
+            names.append(entity.text)
+
+    return names
+
+# Función para detectar palabras clave en un mensaje
+def detect_keywords(message, nlp_model):
+    # Preprocesamiento adicional si es necesario (por ejemplo, eliminación de stopwords)
+
+    # Tokenizar el mensaje
+    doc = nlp_model(message)
+
+    # Obtener las palabras clave (sustantivos, adjetivos, verbos, nombres propios, etc.)
+    keywords = [token.lemma_ for token in doc if token.pos_ in ['NOUN', 'ADJ']]
+
+    return keywords
+
+
+# Función para verificar si un nombre de desarrollo es válido
+def nombre_desarrollo_valido(nombre):
+    for desarrollo in desarrollos:
+        if isinstance(desarrollo['nombre'], list):
+            if any(variante.lower() == nombre.lower() for variante in desarrollo['nombre']):
+                return True
+        else:
+            if nombre.lower() == desarrollo['nombre'].lower():
+                return True
+    return False
+# Función para verificar si un mensaje contiene un saludo junto con el nombre de un desarrollo
+def mensaje_es_saludo_con_desarrollo(message):
+    saludos = ['hola', 'buenos días', 'buenas tardes', 'buenas noches']
+    for saludo in saludos:
+        if saludo in message.lower():
+            for desarrollo in desarrollos:
+                if desarrollo['nombre'].lower() in message.lower():
+                    return True
+    return False
+
+# Función para obtener el desarrollo de interés mencionado en un mensaje
+def obtener_desarrollo_interesado(message):
+    for desarrollo in desarrollos:
+        if any(variante.lower() in message.lower() for variante in desarrollo['nombre']):
+            return desarrollo
+
+    return None
+
+
+# Función para verificar si un mensaje menciona información del cliente
+def menciona_informacion_cliente(message):
+    # Utilizar expresiones regulares para detectar nombres
+    # Aquí se asume que los nombres se componen de palabras que comienzan con una letra mayúscula
+    pattern = re.compile(r'\b[A-Z][a-z]*\b')
+    matches = pattern.findall(message)
+    return len(matches) > 0
+
+# Función para obtener la faq correspondiente a un desarrollo de interés
+def obtener_faq_desarrollo(desarrollo_interesado):
+    for desarrollo in desarrollos:
+        if desarrollo['nombre'] == desarrollo_interesado:
+            return desarrollo['nombre']
+
+    return None
+
+def buscar_pregunta_similar(preguntas, entidades_nombradas, tokens_importantes):
+    preguntas_similares = []
+    
+    for pregunta in preguntas:
+        pregunta_actual = pregunta['preguntas']
+        
+        # Verificar si la pregunta contiene al menos una entidad nombrada similar
+        entidades_nombradas_pregunta = extract_entities(pregunta_actual, nlp_model)
+        entidades_similares = [entidad for entidad in entidades_nombradas if entidad in entidades_nombradas_pregunta]
+        
+        # Verificar si la pregunta contiene al menos un token importante
+        tokens_pregunta = detect_keywords(pregunta_actual, nlp_model)
+        tokens_similares = [token for token in tokens_importantes if token in tokens_pregunta]
+        
+        # Si la pregunta tiene entidades similares o tokens similares, agregarla a las preguntas similares
+        if entidades_similares or tokens_similares:
+            preguntas_similares.append(pregunta_actual)
+    
+    return preguntas_similares
+
+# Variables globales para almacenar la información del usuario
+nombre_usuario = None
+numero_telefono = None
+ruta_archivo = None
+desarrollo_interesado = None
+
+# Función para guardar la información del usuario en variables
+def guardar_informacion_usuario(nombre, telefono, archivo):
+    global nombre_usuario, numero_telefono, ruta_archivo
+    nombre_usuario = nombre
+    numero_telefono = telefono
+    ruta_archivo = archivo
+
+@app.route('/whatsapp', methods=['POST'])
+def process_message():
+    global nombre_usuario, desarrollo_interesado, ruta_archivo
+
+    # Obtener el mensaje y el número de teléfono del remitente
+    message = request.form.get('Body')
+    formatted_phone_number = process_phone_number(request.form.get('From'))
+
+    if nombre_usuario is not None and desarrollo_interesado is not None and ruta_archivo is not None:
+        # Llamar directamente a la función contestar_faqs
+        respuesta = contestar_faqs(ruta_archivo, message)
+        send_whatsapp_message(formatted_phone_number, respuesta)
+        return "OK"
+
+    # Detección de palabras clave y extracción de entidades
+    keywords = detect_keywords(message, nlp_model)  # Pasar el modelo de spaCy como argumento
+    entities = extract_entities(message, nlp_model)  # Pasar el modelo de spaCy como argumento
+    names = extract_message_data(message, nlp_model)  # Pasar el modelo de spaCy como argumento 
+
+    # Obtener el saludo según la hora actual
+    saludo = obtener_saludo()
+
+    # Verificar si el mensaje menciona información del cliente
+    if menciona_informacion_cliente(message):
+        nombres_entidades = extract_message_data(message, nlp_model)  # Pasar el modelo de spaCy como argumento
+
+        # Filtrar los nombres de entidades que no sean similares a nombres o modelos de desarrollos
+        nombres_filtrados = []
+        for nombre in nombres_entidades:
+            if not nombre_desarrollo_valido(nombre):
+                nombres_filtrados.append(nombre)
+
+        nombre_usuario = nombres_filtrados[0] if nombres_filtrados else None
+
+        # Obtener el desarrollo mencionado en el mensaje
+        desarrollo_interesado = obtener_desarrollo_interesado(message)
+
+        # Obtener el contexto del desarrollo mencionado
+        contexto, ruta_archivo = obtener_contexto(message)  # Se utiliza solo el valor del contexto, se ignora la ruta de archivo
+
+        if nombre_usuario and contexto:
+            # Construir el mensaje de saludo junto con el nombre del cliente y el contexto
+            mensaje_saludo = f"{saludo} {nombre_usuario}! {contexto}"
+            send_whatsapp_message(formatted_phone_number, mensaje_saludo)
+
+        elif contexto:
+            # Construir el mensaje de saludo solo con el contexto
+            mensaje_saludo = f"{saludo}! {contexto}."
+            send_whatsapp_message(formatted_phone_number, mensaje_saludo)
+
+            # Seleccionar una forma de manera aleatoria para solicitar el nombre del cliente
+            solicitud_nombre = random.choice(formas_solicitud_nombre)
+
+            # Enviar el mensaje solicitando el nombre del cliente
+            send_whatsapp_message(formatted_phone_number, solicitud_nombre)
+
+        else:
+            # No se encontró el nombre del cliente ni el contexto, no se puede construir el mensaje de saludo
+            mensaje_saludo = None
+
+        # Verificar si se ha guardado la información del usuario previamente
+        if nombre_usuario is None:
+            # Guardar la información del usuario en variables
+            guardar_informacion_usuario(nombre_usuario, formatted_phone_number, desarrollo_interesado)
+
+        if nombre_usuario and ruta_archivo:
+            respuesta = contestar_faqs(ruta_archivo, message)
+            print(f"Ruta del archivo recibida 1: {ruta_archivo}")  # Imprimir la ruta del archivo recibida como argumento
+            # Cerrar el ciclo actual y solicitar más información si es necesario
+            send_whatsapp_message(formatted_phone_number, f"{nombre_usuario}, ¿cómo te puedo apoyar hoy?")
+            return "OK"
+
+    # Verificar si el mensaje contiene una queja
+    pos_tags = pos_tag(word_tokenize(message))
+    if detectar_intenciones(pos_tags, message) == 'queja':
+        respuesta = generar_respuesta('queja', message)  # Pasar el mensaje del cliente como argumento
+        send_whatsapp_message(formatted_phone_number, respuesta)
+        return "OK"
+
+    # Si no se cumplen los criterios anteriores, enviar un mensaje de error
+    send_whatsapp_message(formatted_phone_number, f"No se están cumpliendo los criterios, ruta_archivo = {ruta_archivo}")
+    return "OK"
+
+
+
+# Aquí inicia la parte dos
+def contestar_faqs(ruta_archivo, message):
+    print(f"Ruta del archivo recibida 2: {ruta_archivo}")  # Imprimir la ruta del archivo recibida como argumento
+
+    # Abrir el archivo Python correspondiente usando la ruta almacenada en 'ruta_archivo'
+    with open(ruta_archivo, 'r') as file:
+        contenido = file.read()
+
+        # Cargar el contenido como una lista de diccionarios utilizando json.loads()
+        preguntas_respuestas = json.loads(contenido)
+
+        # Definir las entidades nombradas y tokens importantes del mensaje
+        entidades_nombradas = extract_entities(message, nlp_model)
+        tokens_importantes = detect_keywords(message, nlp_model)
+
+        # Buscar preguntas similares y obtener la respuesta correspondiente
+        for item in preguntas_respuestas:
+            preguntas = item['preguntas']
+            respuesta = item['respuesta']
+
+            # Verificar si alguna de las preguntas tiene entidades o tokens similares
+            for pregunta in preguntas:
+                entidades_nombradas_pregunta = extract_entities(pregunta, nlp_model)
+                entidades_similares = [entidad for entidad in entidades_nombradas if entidad in entidades_nombradas_pregunta]
+
+                tokens_pregunta = detect_keywords(pregunta, nlp_model)
+                tokens_similares = [token for token in tokens_importantes if token in tokens_pregunta]
+
+                # Si la pregunta tiene entidades o tokens similares, devolver la respuesta
+                if entidades_similares or tokens_similares:
+                    return respuesta
+
+        # Si no se encontraron coincidencias, devolver un mensaje de respuesta por defecto
+        return "Lo siento, no puedo responder a esa pregunta en este momento."
+
+
+def chat_with_openai(context, message, keywords, entities):
+    # Buscar respuesta en preguntas frecuentes
+    respuesta_faqs = contestar_faqs(ruta_archivo, message)
+
+    if respuesta_faqs:
+        # Si se encontró una respuesta en las preguntas frecuentes, se devuelve directamente
+        return respuesta_faqs
+    else:
+        # Agregar palabras clave y entidades al contexto
+        full_context = context + ["Keywords:"] + keywords + ["Entities:"] + entities + ["\n"]
+
+        # Concatenar el contexto y el mensaje del cliente
+        prompt = full_context + [message]
+
+        # Establecer los parámetros para generar la respuesta con ChatGPT
+        max_tokens = 50  # Número máximo de tokens para la respuesta generada
+        temperature = 0.6  # Controla la aleatoriedad de las respuestas generadas
+
+        # Generar respuesta con ChatGPT
+        response = openai.Completion.create(
+            engine="text-davinci-003",
+            prompt=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            n=1,
+            stop=None,
+            api_key=OPENAI_API_KEY
+        )
+
+        if response.choices and len(response.choices) > 0:
+            answer = response.choices[0].text.strip()
+            message_with_emoji = assign_emojis(answer)
+            return message_with_emoji
+        else:
+            return 'Lo siento, no tengo información sobre ese tema en particular. ¿Hay algo más en lo que pueda ayudarte?'
+
+def send_whatsapp_message(to, message):
+    client.messages.create(
+        from_=TWILIO_PHONE_NUMBER,  # Debe ser un número de teléfono de WhatsApp válido
+        body=message,
+        to='whatsapp:+5213328650226'  # Número de teléfono del destinatario
+)
+if __name__ == '__main__':
+    app.run(port=65535)

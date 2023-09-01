@@ -1,0 +1,10 @@
+config
+Flask
+twilio
+openai
+spacy
+python-dotenv
+nltk
+emoji
+phonenumbers
+zapier

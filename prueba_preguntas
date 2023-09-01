@@ -1,0 +1,100 @@
+import json
+from difflib import get_close_matches
+import unicodedata
+from fuzzywuzzy import fuzz
+
+# Carga los datos desde el archivo JSON
+with open('faq_desarrollos/faq_kartesia.json', 'r') as json_file:
+    faq_kartesia = json.load(json_file)
+
+def normalize_string(text):
+    return unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('utf-8').lower()
+def buscar_respuesta(pregunta):
+    pregunta_normalizada = normalize_string(pregunta)
+    mejor_coincidencia = None
+    max_similitud = 0
+    
+    for faq in faq_kartesia:
+        for preg in faq["preguntas"]:
+            similitud = fuzz.ratio(pregunta_normalizada, normalize_string(preg))
+            if similitud > max_similitud:
+                max_similitud = similitud
+                mejor_coincidencia = preg
+            
+    if mejor_coincidencia:
+        for faq in faq_kartesia:
+            if mejor_coincidencia in faq["preguntas"]:
+                return faq["respuesta"], faq.get("link_multimedia")
+    
+    return "Lo siento, no encontré una respuesta para esa pregunta.", None
+
+
+while True:
+    pregunta_usuario = input("Pregunta (o escribe 'salir' para terminar): ")
+    
+    if pregunta_usuario.lower() == 'salir':
+        print("Saliendo del sistema de preguntas.")
+        break
+    
+    respuesta, links_multimedia = buscar_respuesta(pregunta_usuario)
+    
+    print(respuesta)
+    if links_multimedia:
+        for link in links_multimedia:
+            print("Enlace multimedia:", link)
+
+
+
+
+
+
+
+
+
+
+
+"""import json
+from difflib import get_close_matches
+import unicodedata
+from fuzzywuzzy import fuzz
+
+# Carga los datos desde el archivo JSON
+with open('faq_desarrollos/faq_kartesia.json', 'r') as json_file:
+    faq_kartesia = json.load(json_file)
+
+def normalize_string(text):
+    return unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('utf-8').lower()
+def buscar_respuesta(pregunta):
+    pregunta_normalizada = normalize_string(pregunta)
+    mejor_coincidencia = None
+    max_similitud = 0
+    
+    for faq in faq_kartesia:
+        for preg in faq["preguntas"]:
+            similitud = fuzz.ratio(pregunta_normalizada, normalize_string(preg))
+            if similitud > max_similitud:
+                max_similitud = similitud
+                mejor_coincidencia = preg
+            
+    if mejor_coincidencia:
+        for faq in faq_kartesia:
+            if mejor_coincidencia in faq["preguntas"]:
+                return faq["respuesta"], faq.get("link_multimedia")
+    
+    return "Lo siento, no encontré una respuesta para esa pregunta.", None
+
+
+while True:
+    pregunta_usuario = input("Pregunta (o escribe 'salir' para terminar): ")
+    
+    if pregunta_usuario.lower() == 'salir':
+        print("Saliendo del sistema de preguntas.")
+        break
+    
+    respuesta, links_multimedia = buscar_respuesta(pregunta_usuario)
+    
+    print(respuesta)
+    if links_multimedia:
+        for link in links_multimedia:
+            print("Enlace multimedia:", link)
+"""
